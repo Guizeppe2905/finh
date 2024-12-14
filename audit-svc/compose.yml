@@ -1,0 +1,22 @@
+services:
+  backend:
+    image: audit_svc
+    restart: always
+    stdin_open: true
+    tty: true
+  db:
+    image: postgres:13
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=audit-svc
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'pg_isready -U user -d audit-svc'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  pg_data:

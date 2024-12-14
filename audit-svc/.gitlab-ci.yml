@@ -1,0 +1,132 @@
+stages:
+  - build
+  - test
+  - publish
+
+variables:
+  POETRY_IMAGE: registry.devops-teta.ru/materials/ci/images/poetry:1.4.1-3.11.6-bookworm
+  KANIKO_IMAGE: registry.devops-teta.ru/materials/ci/images/kaniko:1.9.1
+  POETRY_CACHE_DIR: .cache/poetry
+  PIP_CACHE_DIR: .cache/pip
+  GIT_CLONE_PATH: $CI_BUILDS_DIR/$CI_PROJECT_PATH_SLUG
+  HARBOR_USER: MariaHat
+  HARBOR_HOST: harbor.devops-teta.ru
+  HARBOR_IMAGE: harbor.devops-teta.ru/hatunceva/audit-svc
+  IMAGE_TAG: latest
+  PRJ_DIR: audit-svc
+
+default:
+  before_script:
+    - set -eu
+
+Update Cache:
+  stage: .pre
+  needs: []
+  image: &poetry_image
+    name: $POETRY_IMAGE
+    entrypoint: [""]
+  cache:
+    - &poetry_packages
+      key: poetry-packages
+      paths:
+        - .cache
+      unprotect: true
+    - &poetry_venv
+      key:
+        prefix: poetry-venv
+        files:
+          - poetry.lock
+      paths:
+        - .venv
+      unprotect: true
+  script:
+    - cd $PRJ_DIR
+    - &poetry_install poetry install --no-root --no-interaction
+  rules:
+    - when: always
+  tags:
+    - docker
+
+Build Package:
+  stage: build
+  needs:
+    - job: Update Cache
+      artifacts: false
+  image:
+    name: $POETRY_IMAGE
+    entrypoint: [""]
+  cache:
+    - <<: *poetry_packages
+      policy: pull
+    - <<: *poetry_venv
+      policy: pull
+  script:
+    - cd $PRJ_DIR
+    - *poetry_install
+    - mkdir -p dist
+    - poetry export --without-hashes --format constraints.txt --output dist/constraints.txt
+    - poetry run python -m pip wheel --isolated --requirement dist/constraints.txt --wheel-dir dist/vendor
+    - poetry build --format wheel
+  artifacts:
+    paths:
+      - dist/
+  rules:
+    - when: always
+  tags:
+    - docker
+
+Run Tests:
+  stage: test
+  needs:
+    - job: Build Package
+      artifacts: true
+  image:
+    name: $POETRY_IMAGE
+    entrypoint: [""]
+  script:
+    - cd $PRJ_DIR
+    - poetry install --no-root --no-interaction 
+    - poetry run pytest --junitxml python.junit.xml || true
+  artifacts:
+    paths:
+      - python.junit.xml
+  rules:
+    - if: '$CI_MERGE_REQUEST_ID'
+      when: always 
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: always 
+  tags:
+    - docker
+
+Publish Package:
+  stage: publish
+  needs:
+    - job: Build Package
+      artifacts: true
+    - job: Run Tests
+  interruptible: false
+  image:
+    name: $KANIKO_IMAGE
+    entrypoint: [""]
+  script:
+    - b64_auth=$(printf '%s:%s' "$HARBOR_USER" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
+    - >-
+      printf '{"auths": {"%s": {"auth": "%s"}}}' "$HARBOR_HOST" "$b64_auth"
+      >/kaniko/.docker/config.json
+    - cat /kaniko/.docker/config.json
+    - >-
+      /kaniko/executor
+      --cache
+      --use-new-run
+      --skip-unused-stages
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/Dockerfile"
+      --destination "$HARBOR_IMAGE:$IMAGE_TAG"
+      --cache-repo "$HARBOR_IMAGE/cache"
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: always 
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  tags:
+    - docker
+
